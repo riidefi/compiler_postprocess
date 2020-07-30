@@ -1,3 +1,5 @@
+#!/usr/bin/env python3
+
 BANNER = """
 # This script is the culmination of three patches supporting decompilation
 # with the CodeWarrior compiler.
