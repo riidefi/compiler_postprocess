@@ -133,7 +133,6 @@ def impl_postprocess_elf(f, do_ctor_realign, do_old_stack, do_symbol_fixup):
         if sh_type == SHT_STRTAB and do_symbol_fixup:
             if not secF:
                 secF = True
-                continue
             f.seek(ofsSecHeader + i * 0x28 + 0x10)
             ofs = read_u32(f)
             size = read_u32(f)
