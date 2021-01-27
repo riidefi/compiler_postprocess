@@ -13,7 +13,7 @@ This script is the culmination of three patches supporting decompilation with th
 2) Certain C++ symbols cannot be assembled normally.
    To support the buildsystem, a simple substitution system has been devised
 
-   ?<ID> -> CHAR
+   $<ID> -> CHAR
 
    IDs (all irregular symbols in mangled names):
       0: <
@@ -22,6 +22,8 @@ This script is the culmination of three patches supporting decompilation with th
       3: \\
       4: ,
       5: -
+      6: *
+      7: .
 
    This option is enabled with `-fsymbol-fixup`, and disabled by default with `-fno-symbol-fixup`
 

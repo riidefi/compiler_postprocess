@@ -13,7 +13,7 @@ BANNER = """
 # 2) Certain C++ symbols cannot be assembled normally.
 #    To support the buildsystem, a simple substitution system has been devised
 #
-#    ?<ID> -> CHAR
+#    $<ID> -> CHAR
 #
 #    IDs (all irregular symbols in mangled names):
 #       0: <
@@ -22,6 +22,8 @@ BANNER = """
 #       3: \\
 #       4: ,
 #       5: -
+#       6: *
+#       7: .
 #
 #    This option is enabled with -fsymbol-fixup, and disabled by default with -fno-symbol-fixup
 #
@@ -34,12 +36,14 @@ import struct
 
 # Substitutions
 substitutions = (
-    ('<',  '?0'),
-    ('>',  '?1'),
-    ('@',  '?2'),
-    ('\\', '?3'),
-    (',',  '?4'),
-    ('-',  '?5')
+    ('<',  '$0'),
+    ('>',  '$1'),
+    ('@',  '$2'),
+    ('\\', '$3'),
+    (',',  '$4'),
+    ('-',  '$5'),
+    ('*',  '$6'),
+    ('.',  '$7'),
 )
 
 def format(symbol):
@@ -48,11 +52,16 @@ def format(symbol):
 
     return symbol
 
+# return decoded symbol and list of suffix offsets
 def decodeformat(symbol):
+    suffix_ofs = [] 
+    replace_count = 0
     for sub in substitutions:
-        symbol = symbol.replace(sub[1], sub[0])
-
-    return symbol
+        while symbol.find(sub[1]) != -1:
+            suffix_ofs.append(symbol.find(sub[1]) + replace_count) # Assumes escape sequences are always of length 2
+            symbol = symbol.replace(sub[1], sub[0], 1)
+            replace_count += 1
+    return symbol, suffix_ofs
 
 # Stream utilities
 
@@ -69,8 +78,9 @@ def write_u32(f, val):
     f.write(struct.pack(">I", val))
 
 class ToReplace:
-    def __init__(self, position, dest, src_size):
+    def __init__(self, position, suffix_ofs, dest, src_size):
         self.position = position # Where in file
+        self.suffix_ofs = suffix_ofs # starting offsets of suffixes after each substitution. All <= src_size
         self.dest = dest # String to patch
         self.src_size = src_size # Pad rest with zeroes
 
@@ -107,6 +117,7 @@ def ctor_realign(f, ofsSecHeader, nSecHeader, idxSegNameSeg):
     return patch_align_ofs
 
 SHT_PROGBITS = 1
+SHT_SYMTAB = 2
 SHT_STRTAB = 3
 
 def impl_postprocess_elf(f, do_ctor_realign, do_old_stack, do_symbol_fixup):
@@ -129,14 +140,16 @@ def impl_postprocess_elf(f, do_ctor_realign, do_old_stack, do_symbol_fixup):
         f.seek(ofsSecHeader + i * 0x28)
         sh_name = read_u32(f)
         sh_type = read_u32(f)
-
-        if sh_type == SHT_STRTAB and do_symbol_fixup:
+        f.seek(ofsSecHeader + (idxSegNameSeg * 0x28) + 0x10)
+        ofsShST = read_u32(f)
+        f.seek(ofsShST + sh_name)
+        name = read_string(f)
+        if sh_type == SHT_STRTAB and name == '.strtab' and do_symbol_fixup:
             if not secF:
                 secF = True
             f.seek(ofsSecHeader + i * 0x28 + 0x10)
-            ofs = read_u32(f)
+            ofs = strtab_sh_offset = read_u32(f)
             size = read_u32(f)
-
             f.seek(ofs)
             string = ""
             str_spos = ofs
@@ -144,19 +157,14 @@ def impl_postprocess_elf(f, do_ctor_realign, do_old_stack, do_symbol_fixup):
                 c = read_u8(f)
                 if c == 0:
                     if len(string):
-                        fixed = decodeformat(string)
+                        fixed, suffix_ofs = decodeformat(string)
                         if fixed != string:
-                            result.append(ToReplace(str_spos, fixed, len(string)))
+                            result.append(ToReplace(str_spos, suffix_ofs, fixed, len(string)))
                     string = ""
                     str_spos = i+1
                 else:
                     string += chr(c)
         else:
-            f.seek(ofsSecHeader + (idxSegNameSeg * 0x28) + 0x10)
-            ofsShST = read_u32(f)
-            f.seek(ofsShST + sh_name)
-            name = read_string(f)
-
             if name == ".text" and do_old_stack:
                 f.seek(ofsSecHeader + i * 0x28 + 0x10)
                 ofs = read_u32(f)
@@ -237,13 +245,40 @@ def impl_postprocess_elf(f, do_ctor_realign, do_old_stack, do_symbol_fixup):
                     f.seek(blr_pos - 4)
                     write_u32(f, mtlr)
 
-    return (result, patch_align_ofs)
+    return (result, patch_align_ofs, strtab_sh_offset)
+
+class SymName:
+    def __init__(self, off, val):
+        self.off = off
+        self.val = val
+        self.new_val = val
 
 def postprocess_elf(f, do_ctor_realign, do_old_stack, do_symbol_fixup):
     patches = impl_postprocess_elf(f, do_ctor_realign, do_old_stack, do_symbol_fixup)
 
     f.seek(0)
     source_bytes = list(f.read())
+    
+    # record the file offset of each symbol and the value of its st_name field
+    st_names = []
+    f.seek(0x20)
+    ofsSecHeader = read_u32(f)
+    f.seek(0x30)
+    nSecHeader = read_u16(f)
+    for i in range(nSecHeader):
+        f.seek(ofsSecHeader + i * 0x28 + 0x4)
+        sh_type = read_u32(f)
+        f.seek(ofsSecHeader + i * 0x28 + 0x10)
+        sh_offset = read_u32(f)
+        sh_size = read_u32(f)
+        if sh_type == SHT_SYMTAB:
+            for j in range(sh_size // 0x10):
+                f.seek(sh_offset + j * 0x10)
+                st_names.append(SymName(sh_offset + j * 0x10, read_u32(f)))
+            break
+    else:
+        raise AssertionError("Could not locate .symtab ELF section")
+
     for patch in patches[0]:
         assert len(patch.dest) <= patch.src_size
         for j in range(patch.src_size):
@@ -252,6 +287,20 @@ def postprocess_elf(f, do_ctor_realign, do_old_stack, do_symbol_fixup):
             else:
                 c = ord(patch.dest[j])
             source_bytes[patch.position + j] = c
+
+        # fix symbol table entries that point into suffixes of the string we just shortened
+        strtab_sh_offset = patches[2]
+        for suffix_off in patch.suffix_ofs:
+            start = patch.position + suffix_off - strtab_sh_offset + 2
+            end = patch.position + patch.src_size - strtab_sh_offset
+            # print(hex(start+strtab_sh_offset), hex(end+strtab_sh_offset))
+            for st_name in st_names:
+                if st_name.val >= start and st_name.val < end:
+                    # print('DEBUG: ', hex(st_name.new_val +strtab_sh_offset), ' -> ', hex(st_name.new_val - 1 +strtab_sh_offset))
+                    st_name.new_val -= 1
+                    bstr = (st_name.new_val).to_bytes(4, byteorder='big')
+                    for i in range(4):
+                        source_bytes[st_name.off + i] = bstr[i]
 
     # Patch ctor align
     nP = 0
