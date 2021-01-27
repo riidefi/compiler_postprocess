@@ -122,7 +122,8 @@ SHT_STRTAB = 3
 
 def impl_postprocess_elf(f, do_ctor_realign, do_old_stack, do_symbol_fixup):
     result = []
-
+    strtab_sh_offset = -1
+    
     f.seek(0x20)
     ofsSecHeader = read_u32(f)
     f.seek(0x30)
@@ -244,7 +245,6 @@ def impl_postprocess_elf(f, do_ctor_realign, do_old_stack, do_symbol_fixup):
                     
                     f.seek(blr_pos - 4)
                     write_u32(f, mtlr)
-
     return (result, patch_align_ofs, strtab_sh_offset)
 
 class SymName:
